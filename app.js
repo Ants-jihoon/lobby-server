@@ -1,75 +1,88 @@
-const express = require('express');
-const path = require('path');
-const morgan = require('morgan')
-const cookieParser = require('cookie-parser');
-const session = require('express-session');
-const nunjucks = require('nunjucks');
+const net = require('net');
+const jwt = require("jsonwebtoken");
+const EventEmitter = require('events');
+const protobuf = require('protobufjs');
+const { lobbyctrl } = require('./controller/lobby')
 const dotenv = require('dotenv');
-const ColorHash = require('color-hash').default;
-
-
 dotenv.config();
-// const WebSocket = require('./socket');
-const indexRouter = require('./routes/index');
-const Socket = require('./socket');
-const connect = require('./schemas')
 
-const app = express()
-app.set('port', process.env.PORT || 8005);
-app.set('view engine', 'html');
-nunjucks.configure('views', {
-    express: app,
-    watch: true,
-});
-connect();
-// app.set('views', "./views")
+const emitter = new EventEmitter();
 
-app.use(morgan('dev'));
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
-app.use(cookieParser(process.env.COOKIE_SECRET));
-const sessionMiddleware = session({
-    resave: false,
-    saveUninitialized: false,
-    secret: process.env.COOKIE_SECRET,
-
-    cookie: {
-        httpOnly: true,
-        secure: false,
+protobuf.load("messages.proto", (err, root) => {
+    if (err) {
+        throw err;
     }
+    const login = root.lookupType('login');
+    const customerList = root.lookupType('CustomerList');
+
+    const server = net.createServer(function (socket) {
+        console.log(socket.address().address + " connected.");
+
+
+
+        socket.on('data', function (data) {
+            try {
+                console.log(data)
+                const message = login.decode(data);
+                const command = message.cd;
+                const cl_data = message.token;
+
+
+                if (command === 0) {
+                    emitter.emit('login', cl_data)
+                } else if (command === 1) {
+                    console.log("buyitem")
+                } else if (command === 2) {
+                    console.log("sellitem")
+                }
+
+            } catch (err) {
+                console.error(err);
+            }
+        });
+
+        socket.on('close', function () {
+            console.log(socket.address().address + 'client disconnted.');
+        });
+
+
+
+
+        emitter.on('login', async (cl_data) => {
+            // const req = socket.request;
+            // const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+            // console.log("새로운 클라이언트 접속", ip, socket.id, req.ip);
+            try {
+                const token = cl_data;
+                const payload = jwt.verify(token, process.env.JWT_KEY);
+                const Nick = payload.sub
+                const userdata = await lobbyctrl.login(Nick)
+
+                console.log(userdata.nickname)
+                console.log(socket.address().address + 'in login method')
+                const response = customerList.encode({
+                    nickname: userdata.nickname,
+                    level: userdata.level,
+                    exp: userdata.exp,
+                    cash: userdata.cash
+                }).finish();
+                socket.write(response);
+            } catch (error) {
+                throw new Error("정상적인 접근이 아닙니다.")
+            }
+
+        })
+    });
+
+
+
+
+    server.on('error', function (err) {
+        console.log('err' + err);
+    });
+
+
+    server.listen(8005, function () {
+        console.log('linsteing on 8005..');
+    });
 });
-
-app.use(sessionMiddleware);
-app.use((req, res, next) => {
-    if (!req.session.color) {
-        const colorHash = new ColorHash();
-        req.session.color = colorHash.hex(req.sessionID);
-        console.log(req.session.color, req.sessionID);
-    }
-    next();
-})
-
-
-app.use('/', indexRouter);
-
-
-app.use((req, res, next) => {
-    const error = new Error(`${req.method} ${req.url} 라우터가 없습니다.`);
-    error.status = 404;
-    next(error);
-});
-
-app.use((err, req, res, next) => {
-    res.locals.message = err.message;
-    res.locals.error = process.env.NODE_ENV !== 'production' ? err : {};
-    res.status(err.status || 500);
-    res.render('error')
-})
-
-const server = app.listen(app.get('port'), () => {
-    console.log(app.get('port'), '번 포트에서 대기 중')
-})
-
-//WebSocket(server)
-Socket(server, app, sessionMiddleware)
